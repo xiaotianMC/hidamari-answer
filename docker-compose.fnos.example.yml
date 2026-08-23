@@ -1,0 +1,39 @@
+# fnOS 部署示例（请复制为 docker-compose.fnos.yml 后填写机器人 QQ 与面板密钥）
+services:
+  koishi:
+    image: koishijs/koishi:latest-lite
+    container_name: koishi
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "5140:5140"
+    volumes:
+      - /vol1/1000/docker/koishi:/koishi
+    networks:
+      - koishi-net
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - ACCOUNT=机器人QQ号
+      - MESSAGE_POST_FORMAT=string
+      - WSR_ENABLE=true
+      - 'WS_URLS=["ws://koishi:5140/onebot"]'
+      - WEBUI_TOKEN=改成强密码
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    ports:
+      - "6099:6099"
+    volumes:
+      - /vol1/1000/docker/napcat/config:/app/napcat/config
+      - /vol1/1000/docker/napcat/.config:/app/.config/QQ
+      - /vol1/1000/docker/napcat/logs:/app/napcat/logs
+    networks:
+      - koishi-net
+
+networks:
+  koishi-net:
+    driver: bridge

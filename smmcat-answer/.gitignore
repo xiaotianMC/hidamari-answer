@@ -1,0 +1,28 @@
+lib
+dist
+external
+
+node_modules
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+tsconfig.tsbuildinfo
+
+.eslintcache
+.DS_Store
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# 运行时数据与本地缓存（保留正式题库）
+data/*
+!data/answerData/
+!data/answerData/**
+.npm-cache/
+scripts/__pycache__/
+
+# NAS 部署凭证（复制 .nas-deploy.env.example）
+.nas-deploy.env

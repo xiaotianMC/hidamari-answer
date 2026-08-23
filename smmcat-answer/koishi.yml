@@ -1,0 +1,19 @@
+# Koishi 开发调试配置
+# 运行：npm run dev（即 koishi start）
+# 说明：使用内存数据库 + mock 适配器，本地题库模式（无需联网）
+plugins:
+  database-memory: {}
+  mock:
+    selfId: '514'
+  monetary: {}
+  smmcat-answer:
+    useLocal: true
+    watingTime: 60000
+    watingPlay: 10000
+    autoNext: 10
+    useGlobalNick: false
+    adminQQ: []           # 管理员 QQ 白名单，例：['10001', '10002']
+    atQQ: false
+    debug: false
+    localPath: './data/answerData'
+    answersNumOfRush: 10

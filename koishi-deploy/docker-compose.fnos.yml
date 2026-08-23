@@ -1,0 +1,41 @@
+# fnOS 部署 Koishi + NapCat（smmcat-answer 答题机器人）
+# 用法：把本文件放到 /vol1/1000/docker/ 下，修改 ACCOUNT 与 WEBUI_TOKEN 后
+#       在 fnOS Docker -> Compose 项目中部署，或 SSH 执行 docker compose up -d
+services:
+  koishi:
+    image: koishijs/koishi:latest-lite
+    container_name: koishi
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "5140:5140"          # Koishi 控制台
+    volumes:
+      - /vol1/1000/docker/koishi:/koishi
+    networks:
+      - koishi-net
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - ACCOUNT=机器人QQ号            # ← 必改：机器人 QQ 号
+      - MESSAGE_POST_FORMAT=string
+      - WSR_ENABLE=true               # 反向 WS（NapCat 主动连 Koishi）
+      - 'WS_URLS=["ws://koishi:5140/onebot"]'
+      - WEBUI_TOKEN=改成强密码         # ← 必改：NapCat 面板访问密钥
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    ports:
+      - "6099:6099"          # NapCat WebUI（扫码登录）
+    volumes:
+      - /vol1/1000/docker/napcat/config:/app/napcat/config
+      - /vol1/1000/docker/napcat/.config:/app/.config/QQ
+      - /vol1/1000/docker/napcat/logs:/app/napcat/logs
+    networks:
+      - koishi-net
+
+networks:
+  koishi-net:
+    driver: bridge
