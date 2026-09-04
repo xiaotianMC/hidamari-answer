@@ -1,4 +1,4 @@
-# hidamari-question · 群内抢答机器人 + 《向阳王决定战》题库
+# hidamari-question · 群内答题机器人
 
 本项目围绕一个 **QQ 群答题（抢答）机器人** 整理而成：包含答题插件源码（`smmcat-answer`）、fnOS 服务器部署方案（`koishi-deploy`），以及 bot 题库 JSON 格式规范。
 
