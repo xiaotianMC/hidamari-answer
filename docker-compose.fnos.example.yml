@@ -4,8 +4,11 @@ services:
     image: koishijs/koishi:latest-lite
     container_name: koishi
     restart: always
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       - TZ=Asia/Shanghai
+      - NODE_OPTIONS=--max-old-space-size=192 --expose-gc
     ports:
       - "5140:5140"
     volumes:
@@ -17,6 +20,8 @@ services:
     image: mlikiowa/napcat-docker:latest
     container_name: napcat
     restart: always
+    mem_limit: 512m
+    memswap_limit: 512m
     environment:
       - ACCOUNT=机器人QQ号
       - MESSAGE_POST_FORMAT=string

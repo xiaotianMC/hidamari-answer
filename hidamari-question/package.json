@@ -1,7 +1,7 @@
 {
-  "name": "koishi-plugin-smmcat-answer",
+  "name": "koishi-plugin-hidamari-question",
   "description": "在群里答题吧！",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -34,7 +34,7 @@
     "@koishijs/plugin-mock": "^2.6.6",
     "koishi": "^4.18.2",
     "koishi-plugin-monetary": "^0.1.3",
-    "koishi-plugin-smmcat-answer": "file:.",
+    "koishi-plugin-hidamari-question": "file:.",
     "tsx": "^4.23.0",
     "typescript": "^5.5.0",
     "yml-register": "^1.2.5"

@@ -1,8 +1,8 @@
 # hidamari-question · 群内答题机器人
 
-本项目围绕一个 **QQ 群答题（抢答）机器人** 整理而成：包含答题插件源码（`smmcat-answer`）、fnOS 服务器部署方案（`koishi-deploy`），以及 bot 题库 JSON 格式规范。
+本项目围绕一个 **QQ 群答题（抢答）机器人** 整理而成：包含答题插件源码（`hidamari-question`）、fnOS 服务器部署方案（`koishi-deploy`），以及 bot 题库 JSON 格式规范。
 
-> 一句话链路：**Koishi（机器人框架）← OneBot ← NapCat（QQ 协议桥）← 群用户**；答题逻辑由 `smmcat-answer` 插件实现，题目数据为本地 JSON 题库。
+> 一句话链路：**Koishi（机器人框架）← OneBot ← NapCat（QQ 协议桥）← 群用户**；答题逻辑由 `hidamari-question` 插件实现，题目数据为本地 JSON 题库。
 
 ---
 
@@ -15,7 +15,7 @@ hidamari-question/
 ├── docker-compose.fnos.example.yml ← fnOS Compose 示例（无密钥）
 ├── onebot11.json                 ← NapCat OneBot 配置示例
 │
-├── smmcat-answer/                ← ★ 答题插件（koishi-plugin-smmcat-answer）
+├── hidamari-question/            ← ★ 答题插件（koishi-plugin-hidamari-question）
 │   ├── src/index.ts              ←   插件全部逻辑（出题/作答/判分/积分）
 │   ├── src/data.ts               ←   数据类型定义 + 演示题库
 │   ├── lib/                      ←   编译产物（npm 包入口）
@@ -30,14 +30,14 @@ hidamari-question/
     └── docker-compose.fnos.yml   ←   实际使用的 Compose（koishi + napcat）
 ```
 
-正式部署用的 Compose 在 `koishi-deploy/docker-compose.fnos.yml`。根目录一次性排障脚本、网页存档 HTML（日文 `hidaking/`、简体 `中文翻译/`）已移出本仓库。
+正式部署用的 Compose 在 `koishi-deploy/docker-compose.fnos.yml`。
 
 ---
 
 ## 快速开始（本地开发/测试答题插件）
 
 ```bash
-cd smmcat-answer
+cd hidamari-question
 npm install
 npm run dev      # 启动 Koishi（koishi.yml：内存库 + mock，本地题库模式，无需联网）
 npm run smoke    # 端到端冒烟测试：注册 → 开始抢答 → 作答 → 公布答案 → 结算
@@ -45,6 +45,77 @@ npm run smoke    # 端到端冒烟测试：注册 → 开始抢答 → 作答 �
 
 - `npm run smoke` 会使用 `data/answerData-smoke/test.json` 跑完整流程并断言输出，适合改完逻辑后回归。
 - 默认本地题库目录为 `data/answerData/`，首次运行会自动生成演示题库 `test.json`。
+
+---
+
+## 指令（群聊先 @机器人）
+
+群聊须先 **@机器人** 再发指令（可带或不带 `/`）。只 @ 机器、不带内容会回复完整帮助。管理员由插件配置 `adminQQ` 决定。别名写在括号里。
+
+### 账号
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/注册` | 注册账号（昵称取群名片；首次答题也会自动注册） | 所有人 |
+| `/改名 <新昵称>` | 修改自己的昵称 | 已注册 |
+| `/我的账号` | 查看昵称和 QQ | 所有人 |
+| `/注销` | 注销账号（答题记录仍保留） | 已注册 |
+| `/答题记录` | 查看自己的答题记录（按 QQ，注销后仍可看） | 所有人 |
+
+### 抢答 · 作答
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/回答 <答案>` | 作答当前抢答题（选择填字母，填空填内容） | 已注册 |
+| `/A`～`/H` | 快捷作答，等价于 `/回答 A` | 已注册 |
+
+### 抢答 · 管理
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/开始抢答 [题库名]` | 开始一局抢答 | **管理员** |
+| `/结束本题` | 立即公布本题并进入下一题 | **管理员** |
+| `/跳到 <题号>`（`/快进`） | 快进到指定题（中间题不结算） | **管理员** |
+| `/结束抢答` | 结束整局并结算 | **管理员** |
+| `/答题题目` | 查看可用题库 | 所有人 |
+| `/用户列表` | 查看已注册用户 | **管理员** |
+
+### 每日发题
+
+从指定总题库按顺序每天一次性发出若干题；成员用**一条消息**答完全部题；到点公布答案。发题/结算时间、题数、题库均可在群里改。
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/每日发题`（`/每日一题`） | 查看本群每日发题状态 | 所有人 |
+| `/每日发题 开启 [题库]` | 开启本群每日发题 | **管理员** |
+| `/每日发题 关闭` | 关闭自动发题（当日已发出的仍可作答、到点仍结算） | **管理员** |
+| `/每日发题 时间 HH:mm` | 每天发题时间（须早于结算） | **管理员** |
+| `/每日发题 结算 HH:mm` | 每天结算时间（须晚于发题） | **管理员** |
+| `/每日发题 题数 N` | 每天题数（1～20） | **管理员** |
+| `/每日发题 题库 名称` | 指定总题库（进度游标归零） | **管理员** |
+| `/每日发题 现在发` | 立即发今日题（已发过则重发同一批） | **管理员** |
+| `/每日发题 现在结算` | 立即结算并公布答案 | **管理员** |
+| `/每日回答 A B C`（`/日答`） | 一条消息回答当日全部题 | 已注册 |
+
+选择题空格分隔；填空含空格时用逗号：`/每日回答 苍树梅,B,东边`。重复提交以最后一次为准。
+
+### 跨群
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/跨群绑定 <群号>`（`/同步群`） | 绑定其他群，开局/切题同步 | **管理员** |
+| `/跨群解绑`（`/取消同步群`） | 解除本群跨群绑定 | **管理员** |
+| `/跨群状态`（`/跨群列表`） | 查看当前绑定 | 所有人 |
+
+### 休眠
+
+| 指令 | 说明 | 权限 |
+|---|---|---|
+| `/休眠` | 卸载题库、回收空闲房间 | **管理员** |
+| `/唤醒` | 立即加载题库 | 所有人 |
+| `/休眠状态` | 查看是否休眠、题库是否在内存 | 所有人 |
+
+群内使用说明见 `koishi-deploy/使用手册.md`。
 
 ---
 
@@ -88,21 +159,20 @@ npm run smoke    # 端到端冒烟测试：注册 → 开始抢答 → 作答 �
 
 - 完整步骤（Compose 方式 / 界面方式、QQ 扫码登录、插件安装配置、验证、FAQ）见 **`koishi-deploy/DEPLOY-fnos.md`**；
 - `koishi-deploy/docker-compose.fnos.yml` 为实际使用的编排文件（Koishi 控制台 `:5140`，NapCat WebUI `:6099`）；
-- 管理指令（`/开始抢答`、`/结束本题`、`/结束抢答`）仅 `adminQQ` 白名单可执行；
-- 用户流程：`/注册` → `/开始抢答`（管理员）→ `/回答 A` → 作答时间结束统一公布答案并结算积分（monetary，连击额外加分）。
+- 管理指令仅 `adminQQ` 白名单可执行；完整指令见上方「指令」；
+- 抢答流程：`/注册` → `/开始抢答`（管理员）→ `/回答 A` → 作答时间结束统一公布并结算；
+- 每日发题：管理员 `/每日发题 开启 题库名` 后按设定时间自动发题，成员 `/每日回答 A B C` 一条消息答完全部题。
 
 ---
 
 ## 题库文件
-
-群内抢答使用 `smmcat-answer/data/answerData/*.json`（格式见 `抢答题数据规范.md`）。官方活动网页存档（日文 HTML / 简体翻译 HTML）不是 bot 题库格式，已不放在本仓库。原始站点快照见 [Wayback Machine](https://web.archive.org/web/*/hidamari-sketch.info)。
-
+群内抢答使用 `hidamari-question/data/answerData/*.json`（格式见 `抢答题数据规范.md`）。
 ---
 
 ## 相关链接
 
 - Koishi 框架：https://koishi.chat
-- smmcat-answer 论坛帖：https://forum.koishi.xyz/t/topic/8084
-- smmcat-answer 上游源码：https://github.com/smmcat/smmcat-answer
+- 原插件论坛帖：https://forum.koishi.xyz/t/topic/8084
+- 原插件源码：https://github.com/smmcat/smmcat-answer
 - NapCat-Docker：https://github.com/NapNeko/NapCat-Docker
 - 存档来源（Internet Archive）：https://web.archive.org/web/*/hidamari-sketch.info

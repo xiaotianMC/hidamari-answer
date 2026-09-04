@@ -115,7 +115,7 @@ async function main() {
   client = app.mock.client(USER_ID, CHANNEL_ID)
   startPolling()
   console.log('==============================================')
-  console.log(' smmcat-answer 本地交互测试（mock 模拟群聊）')
+  console.log(' hidamari-question 本地交互测试（mock 模拟群聊）')
   console.log(` 群: ${CHANNEL_ID}   用户: ${USER_ID}   Bot: ${SELF_ID}`)
   console.log('----------------------------------------------')
   console.log(' 流程：/注册 → /开始抢答 → /回答 A（作答不判对错）')

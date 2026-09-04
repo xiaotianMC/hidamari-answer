@@ -109,6 +109,13 @@ app.plugin(answer, {
   autoNext: 2,
   debug: true,
   adminQQ: ['111111111'], // user1 是管理员
+  sleep: {
+    enabled: true,
+    idleMinutes: 0,
+    startAsleep: true,
+    unloadQuiz: true,
+    autoEndIdleGameMinutes: 0,
+  },
 })
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -175,6 +182,39 @@ async function main() {
   const rBind = await admin.receive(say('/跨群绑定 876543210'))
   console.log('[smoke] /跨群绑定 ->', JSON.stringify(rBind))
   all.push(...rBind)
+
+  // 3.1 休眠策略：启动即休眠 → 唤醒 → 手动休眠 → 开局自动唤醒
+  const rSleepSt0 = await admin.receive(say('/休眠状态'))
+  console.log('[smoke] /休眠状态(启动) ->', JSON.stringify(rSleepSt0))
+  all.push(...rSleepSt0)
+  const rWake = await admin.receive(say('/唤醒'))
+  console.log('[smoke] /唤醒 ->', JSON.stringify(rWake))
+  all.push(...rWake)
+  const rSleepDeny = await user2.receive(say('/休眠'))
+  console.log('[smoke] 非管理员 /休眠 ->', JSON.stringify(rSleepDeny))
+  all.push(...rSleepDeny)
+  const rSleep = await admin.receive(say('/休眠'))
+  console.log('[smoke] /休眠 ->', JSON.stringify(rSleep))
+  all.push(...rSleep)
+
+  const rDailyDenied = await user2.receive(say('/每日发题 开启 测试题'))
+  console.log('[smoke] 非管理员 /每日发题 开启 ->', JSON.stringify(rDailyDenied))
+  all.push(...rDailyDenied)
+  const rDailyOn = await admin.receive(say('/每日发题 开启 测试题'))
+  console.log('[smoke] /每日发题 开启 ->', JSON.stringify(rDailyOn))
+  all.push(...rDailyOn)
+  const rDailyN = await admin.receive(say('/每日发题 题数 2'))
+  console.log('[smoke] /每日发题 题数 ->', JSON.stringify(rDailyN))
+  all.push(...rDailyN)
+  const rDailySend = await admin.receive(say('/每日发题 现在发'))
+  console.log('[smoke] /每日发题 现在发 ->', JSON.stringify(rDailySend))
+  all.push(...rDailySend)
+  const rDailyAns = await admin.receive(say('/每日回答 A A'))
+  console.log('[smoke] /每日回答 ->', JSON.stringify(rDailyAns))
+  all.push(...rDailyAns)
+  const rDailySettle = await admin.receive(say('/每日发题 现在结算'))
+  console.log('[smoke] /每日发题 现在结算 ->', JSON.stringify(rDailySettle))
+  all.push(...rDailySettle)
 
   // 4. 管理员开始抢答
   const r1 = await admin.receive(say('/开始抢答'))
@@ -256,6 +296,13 @@ async function main() {
     text.includes('你没有权限执行此操作') &&
     text.includes('未绑定其他群') &&
     text.includes('876543210') &&
+    text.includes('已开启每日发题') &&
+    text.includes('【每日发题】') &&
+    text.includes('已收到你的 2 题答案') &&
+    text.includes('【每日发题结算】') &&
+    text.includes('休眠中') &&
+    text.includes('已唤醒') &&
+    text.includes('已进入休眠') &&
     text.includes('现在开始进行游戏') &&
     (text.includes('已快进到第 2 题') || text.includes('已跳转到第 2 题')) &&
     (text.includes('点击上方选项作答') || text.includes('直接发送 /') || text.includes('作答：先 @我 再发送 /')) &&

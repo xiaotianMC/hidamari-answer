@@ -6,7 +6,7 @@ plugins:
   mock:
     selfId: '514'
   monetary: {}
-  smmcat-answer:
+  hidamari-question:
     useLocal: true
     watingTime: 60000
     watingPlay: 10000
@@ -17,3 +17,9 @@ plugins:
     debug: false
     localPath: './data/answerData'
     answersNumOfRush: 10
+    sleep:
+      enabled: true
+      idleMinutes: 20
+      startAsleep: true
+      unloadQuiz: true
+      autoEndIdleGameMinutes: 10

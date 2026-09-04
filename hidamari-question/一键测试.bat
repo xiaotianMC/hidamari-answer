@@ -1,9 +1,9 @@
 @echo off
-title smmcat-answer Local Test
+title hidamari-question Local Test
 cd /d "%~dp0"
 
 echo ==============================================
-echo   smmcat-answer Local Test
+echo   hidamari-question Local Test
 echo ==============================================
 echo.
 echo   [1] Smoke test (automated, verify full flow)

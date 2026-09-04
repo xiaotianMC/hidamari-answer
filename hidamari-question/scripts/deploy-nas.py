@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy local smmcat-answer plugin to fnOS Koishi volume via SSH/SFTP."""
+"""Deploy local hidamari-question plugin to fnOS Koishi volume via SSH/SFTP."""
 from __future__ import annotations
 
 import io
@@ -17,8 +17,8 @@ PORT = int(os.environ.get("NAS_PORT", "22"))
 
 PLUGIN_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REMOTE_KOISHI = "/vol1/1002/docker/koishi"
-REMOTE_PLUGIN = f"{REMOTE_KOISHI}/node_modules/koishi-plugin-smmcat-answer"
-REMOTE_TMP = "/tmp/smmcat-answer-deploy.tgz"
+REMOTE_PLUGIN = f"{REMOTE_KOISHI}/node_modules/koishi-plugin-hidamari-question"
+REMOTE_TMP = "/tmp/hidamari-question-deploy.tgz"
 
 
 def die(msg: str, code: int = 1):
@@ -87,7 +87,7 @@ def main():
     ssh.connect(HOST, port=PORT, username=USER, password=PASSWORD, timeout=30)
 
     # Probe layout
-    run(ssh, f"ls -la {REMOTE_KOISHI}/node_modules/koishi-plugin-smmcat-answer 2>/dev/null || ls -la {REMOTE_KOISHI}/node_modules 2>/dev/null | head -40", check=False)
+    run(ssh, f"ls -la {REMOTE_KOISHI}/node_modules/koishi-plugin-hidamari-question 2>/dev/null || ls -la {REMOTE_KOISHI}/node_modules 2>/dev/null | head -40", check=False)
     run(ssh, "docker ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null || true", check=False)
 
     sftp = ssh.open_sftp()
@@ -100,6 +100,8 @@ def main():
     sudo(ssh, f"mkdir -p {REMOTE_PLUGIN}")
     sudo(ssh, f"tar -xzf {REMOTE_TMP} -C {REMOTE_PLUGIN}")
     run(ssh, f"rm -f {REMOTE_TMP}", check=False)
+    sudo(ssh, f"rm -rf {REMOTE_KOISHI}/node_modules/koishi-plugin-smmcat-answer", check=False)
+    sudo(ssh, f"sed -i 's/smmcat-answer:/hidamari-question:/g' {REMOTE_KOISHI}/koishi.yml", check=False)
 
     # 校验：版本号 + 新指令是否存在
     run(ssh, f"grep -o '\"version\": \"[^\"]*\"' {REMOTE_PLUGIN}/package.json | head -1")
@@ -110,12 +112,14 @@ def main():
     run(ssh, f"grep -c 'jumpToQuestion' {REMOTE_PLUGIN}/lib/index.js")
     run(ssh, f"grep -c 'sendMarkdownInDoubleForward' {REMOTE_PLUGIN}/lib/index.js")
     run(ssh, f"grep -c 'ensureRegistered' {REMOTE_PLUGIN}/lib/index.js")
+    run(ssh, f"grep -c 'enterSleep' {REMOTE_PLUGIN}/lib/index.js")
+    run(ssh, f"grep -c '休眠状态' {REMOTE_PLUGIN}/lib/index.js")
 
-    # 重启 koishi + napcat（Koishi 重启后 NapCat 需重连 OneBot）
-    code, _out, _err = run(ssh, "docker restart koishi napcat", check=False)
+    # 只重启 Koishi 以加载新插件；不重启 NapCat（省内存、避免 QQ 掉登录）
+    code, _out, _err = run(ssh, "docker restart koishi", check=False)
     if code != 0:
-        print("[deploy] retrying with sudo docker restart ...")
-        sudo(ssh, "docker restart koishi napcat")
+        print("[deploy] retrying with sudo docker restart koishi ...")
+        sudo(ssh, "docker restart koishi")
 
     time.sleep(8)
     sudo(ssh, "docker ps --filter name=koishi --filter name=napcat --format 'table {{.Names}}\\t{{.Status}}'", check=False)

@@ -1,4 +1,4 @@
-# fnOS 部署 Koishi + NapCat（smmcat-answer 答题机器人）
+# fnOS 部署 Koishi + NapCat（hidamari-question 答题机器人）
 # 用法：把本文件放到 /vol1/1000/docker/ 下，修改 ACCOUNT 与 WEBUI_TOKEN 后
 #       在 fnOS Docker -> Compose 项目中部署，或 SSH 执行 docker compose up -d
 services:
@@ -6,8 +6,11 @@ services:
     image: koishijs/koishi:latest-lite
     container_name: koishi
     restart: always
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       - TZ=Asia/Shanghai
+      - NODE_OPTIONS=--max-old-space-size=192 --expose-gc
     ports:
       - "5140:5140"          # Koishi 控制台
     volumes:
@@ -19,6 +22,8 @@ services:
     image: mlikiowa/napcat-docker:latest
     container_name: napcat
     restart: always
+    mem_limit: 512m
+    memswap_limit: 512m
     environment:
       - ACCOUNT=机器人QQ号            # ← 必改：机器人 QQ 号
       - MESSAGE_POST_FORMAT=string

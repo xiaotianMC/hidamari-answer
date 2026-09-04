@@ -28,6 +28,18 @@ declare module 'koishi' {
       answeredAt: number
       sessionId: number
     }
+    daily_quiz: {
+      guildId: string
+      enabled: boolean
+      quizName: string
+      sendTime: string
+      settleTime: string
+      count: number
+      cursor: number
+      lastSend: string
+      lastSettle: string
+      todayJson: string
+    }
   }
 }
 
@@ -57,7 +69,50 @@ function getAnswerText(entry: string | AnswerEntry): string {
   return String(entry.answer ?? '')
 }
 
-export const name = 'smmcat-answer'
+const LETTER_INDEX: Record<string, number> = {
+  A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, K: 9, L: 10, M: 11,
+  N: 12, O: 13, P: 14, Q: 15, R: 16, S: 17, T: 18, U: 19, V: 20, W: 21, X: 22, Z: 23,
+}
+
+function normalizeQuizAnswer(answer: string, item: QuizQuestion) {
+  let norm = String(answer).replace(/\s/g, '')
+  if (item?.column?.length) {
+    const idx = LETTER_INDEX[norm.toUpperCase()]
+    if (idx !== undefined && item.column[idx]) {
+      norm = String(item.column[idx]).replace(/\s/g, '')
+    }
+  }
+  return norm
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, '0')
+}
+
+function todayStr(d = new Date()) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+function hmNow(d = new Date()) {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+function parseHm(text: string) {
+  const m = String(text || '').trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/)
+  if (!m) return null
+  return `${pad2(+m[1])}:${m[2]}`
+}
+
+function parseDailyAnswers(text: string, n: number) {
+  const t = String(text || '').trim()
+  if (!t) return null
+  const parts = (/[,，、]/.test(t) ? t.split(/[,，、]/) : t.split(/\s+/))
+    .map((s) => s.replace(/^\d+[\.。、．:：]/, '').trim())
+    .filter(Boolean)
+  return parts.length === n ? parts : null
+}
+
+export const name = 'hidamari-question'
 
 export interface Config {
   watingTime: number;
@@ -74,6 +129,21 @@ export interface Config {
   clickableOptions: boolean;
   /** 3 分题最先作答且答对可拿满分的人数，其余答对基础分减半 */
   highMarkFullCount: number;
+  /** 空闲休眠：卸载题库、回收房间，降低常驻占用 */
+  sleep: SleepConfig;
+}
+
+export interface SleepConfig {
+  /** 启用空闲休眠 */
+  enabled: boolean;
+  /** 无对局且无指令后等待多少分钟进入休眠；0 表示不自动休眠 */
+  idleMinutes: number;
+  /** 启动时不预加载题库 */
+  startAsleep: boolean;
+  /** 休眠时从内存卸载题库 */
+  unloadQuiz: boolean;
+  /** 对局中连续无人作答超过该分钟数则自动结束；0 表示不自动结束 */
+  autoEndIdleGameMinutes: number;
 }
 
 export const inject = ['monetary', 'database'];
@@ -99,9 +169,36 @@ export const Config: Schema<Config> = Schema.object({
   adminQQ: Schema.array(Schema.string()).default([]).description('管理员 QQ 号白名单（可执行开始/结束抢答、结束本题、跳到指定题等管理操作）'),
   clickableOptions: Schema.boolean().default(false).description('尝试用合并转发+Markdown 发送可点击选项（仅官方 QQ 机器人/部分手机 QQ 可能有效；NapCat 普通号通常无效）'),
   highMarkFullCount: Schema.number().default(5).description('3 分题最先作答的若干人答对得满分，其余答对基础分减半'),
+  sleep: Schema.object({
+    enabled: Schema.boolean().default(true).description('启用空闲休眠：无对局时卸载题库、回收房间对象，降低内存占用'),
+    idleMinutes: Schema.number().default(20).min(0).description('无指令且无进行中对局后，等待多少分钟进入休眠；0 表示不自动休眠'),
+    startAsleep: Schema.boolean().default(true).description('启动时不预加载题库，首次开局或 /唤醒 时再加载'),
+    unloadQuiz: Schema.boolean().default(true).description('休眠时从内存卸载题库'),
+    autoEndIdleGameMinutes: Schema.number().default(10).min(0).description('对局中连续无人作答超过该分钟数则自动结束本局（便于进入休眠）；0 表示不自动结束'),
+  }).description('休眠策略（降低空闲时服务器占用）'),
 })
 
 export function apply(ctx: Context, config: Config) {
+
+  function sleepOpt() {
+    const s = config.sleep || ({} as Partial<SleepConfig>)
+    return {
+      enabled: s.enabled !== false,
+      idleMinutes: typeof s.idleMinutes === 'number' ? s.idleMinutes : 20,
+      startAsleep: s.startAsleep !== false,
+      unloadQuiz: s.unloadQuiz !== false,
+      autoEndIdleGameMinutes: typeof s.autoEndIdleGameMinutes === 'number' ? s.autoEndIdleGameMinutes : 10,
+    }
+  }
+
+  const sleepState = {
+    asleep: false,
+    quizLoaded: false,
+    lastActiveAt: Date.now(),
+    reason: 'boot',
+    idleTimer: null as (() => void) | null,
+    loading: null as Promise<void> | null,
+  }
 
   /** 回复指令时 @ 发送者 */
   function mention(session: any) {
@@ -115,7 +212,7 @@ export function apply(ctx: Context, config: Config) {
     return [...new Set(found.map(String))]
   }
 
-  const CROSS_FILE = () => path.join(ctx.baseDir, 'data', 'smmcat-answer-cross.json')
+  const CROSS_FILE = () => path.join(ctx.baseDir, 'data', 'hidamari-question-cross.json')
 
   function loadCrossSets(): string[][] {
     try {
@@ -271,8 +368,9 @@ export function apply(ctx: Context, config: Config) {
   }, true)
 
   ctx.before('command/execute', (argv) => {
-    if (isGroupCommandAllowed(argv.session)) return
-    return ''
+    if (!isGroupCommandAllowed(argv.session)) return ''
+    const name = argv.command?.name
+    if (name && name !== '休眠') touchActivity()
   })
 
   // 读取用户昵称（注册用）：useGlobalNick 开启时固定取平台昵称，否则优先当前群名片/群昵称
@@ -328,6 +426,19 @@ export function apply(ctx: Context, config: Config) {
     answeredAt: 'unsigned',
     sessionId: 'unsigned',
   }, { primary: 'id', autoInc: true })
+
+  ctx.model.extend('daily_quiz', {
+    guildId: 'string',
+    enabled: 'boolean',
+    quizName: 'string',
+    sendTime: 'string',
+    settleTime: 'string',
+    count: 'unsigned',
+    cursor: 'unsigned',
+    lastSend: 'string',
+    lastSettle: 'string',
+    todayJson: 'text',
+  }, { primary: 'guildId' })
 
   // 获取随机题目
   async function getRandomAnswer({ sed = '1', num = config.answersNumOfRush }) {
@@ -391,8 +502,17 @@ export function apply(ctx: Context, config: Config) {
         await Promise.all(eventList)
         this.localAnswer = temp
         this.answerMenu = tempMenu
-        config.debug && console.log(`[smmcat-answer]:本地题库加载完成。成功${dict.ok}个,失败:${dict.err}个`);
+        config.debug && console.log(`[hidamari-question]:本地题库加载完成。成功${dict.ok}个,失败:${dict.err}个`);
       }
+    },
+    /** 只查找已有房间，不创建（避免闲聊/误指令撑起内存对象） */
+    peekGuild(guildId) {
+      if (!guildId) return null
+      const cluster = clusterOf(String(guildId))
+      for (const id of cluster) {
+        if (this.guildList[id]) return this.guildList[id]
+      }
+      return null
     },
     // 获取群信息
     getGuildList(guildId) {
@@ -417,6 +537,7 @@ export function apply(ctx: Context, config: Config) {
           answers: {},               // 每题作答记录：{ playIndex: { uid: AnswerEntry } }
           comboState: {},            // 连续答对计数：{ uid: count }
           playUser: {},
+          lastInteractAt: 0,         // 最近一次用户互动（开局/作答/管理操作）
           // 初始化群信息
           initGuildInfo() {
             const playUser = Object.keys(this.playUser);
@@ -435,6 +556,8 @@ export function apply(ctx: Context, config: Config) {
             this.answers = {}; // 重置作答记录
             this.comboState = {}; // 重置连击状态
             this.playUser = {};
+            this.lastInteractAt = 0;
+            scheduleIdleSleep();
           },
           /** 从作答条目取出答案文本 */
           getAnswerText(entry) {
@@ -506,6 +629,9 @@ export function apply(ctx: Context, config: Config) {
           async startAnswer(guild = '') {
             if (this.isUse)
               return { code: false, msg: '正在游戏！请不要重复开启' };
+            await ensureQuizLoaded();
+            this.lastInteractAt = Date.now();
+            cancelIdleSleep();
             if (!config.useLocal) {
               const type = await this.createAnswerUseNetwork(guild);
               if (!type.code) return type
@@ -647,6 +773,17 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
           // 题目作答时间结束：判定并发放积分（不公布谁对谁错），公布正确答案，进入下一题
           async onQuestionTimeout(gen, session) {
             if (gen !== this.gen || !this.isUse) return; // 旧回调或游戏已结束，忽略
+            const idleLimit = sleepOpt().autoEndIdleGameMinutes;
+            if (idleLimit > 0) {
+              const last = this.lastInteractAt || this.beginTime || 0;
+              if (last && Date.now() - last >= idleLimit * 60 * 1000) {
+                config.debug && console.log(`[休眠] 对局空闲 ${idleLimit} 分钟，自动结束`);
+                await fanout(session, `长时间无人作答（超过 ${idleLimit} 分钟），本局已自动结束`);
+                await this.endGame(session);
+                enterSleep('idle-game');
+                return;
+              }
+            }
             // autoNext <= 0：不自动公布/切题，挂起等待（每 watingTime 检查一次）
             if (config.autoNext <= 0) {
               const gen2 = ++this.gen;
@@ -661,6 +798,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
           async endCurrentQuestion(session) {
             if (!this.isUse) return { code: false, msg: '还未开始答题' };
             if (this.revealing) return { code: false, msg: '正在切换题目，请稍候' };
+            this.lastInteractAt = Date.now();
+            touchActivity();
             await this.revealAndNext(session);
             return { code: true };
           },
@@ -681,6 +820,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
               return { code: false, msg: `当前已是第 ${questionNum} 题` };
             }
             const from = this.playIndex >= 0 ? this.playIndex + 1 : 0;
+            this.lastInteractAt = Date.now();
+            touchActivity();
             this.timer && this.timer();
             this.timer = null;
             this.gen++;
@@ -814,15 +955,7 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
           },
           // 将作答（选择题为字母，填空题为文本）规范化为可比较的内容
           normalizeAnswer(answer, item) {
-            let norm = String(answer).replace(/\s/g, '');
-            if (item?.column?.length) {
-              const dict = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'K': 9, 'L': 10, 'M': 11, 'N': 12, 'O': 13, 'P': 14, 'Q': 15, 'R': 16, 'S': 17, 'T': 18, 'U': 19, 'V': 20, 'W': 21, 'X': 22, 'Z': 23 };
-              const idx = dict[norm.toUpperCase()];
-              if (idx !== undefined && item.column[idx]) {
-                norm = String(item.column[idx]).replace(/\s/g, '');
-              }
-            }
-            return norm;
+            return normalizeQuizAnswer(answer, item);
           },
           // 记录用户的作答（不判对错，作答时间结束后统一公布正确答案并结算积分）
           async checkAnswerRight(query, session, profile?: { qq: string; nickname: string }) {
@@ -861,9 +994,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
             }
             // 校验选项格式（选择题只能填选项字母）
             if (this.answerItem[index].column?.length) {
-              const dict = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'K': 9, 'L': 10, 'M': 11, 'N': 12, 'O': 13, 'P': 14, 'Q': 15, 'R': 16, 'S': 17, 'T': 18, 'U': 19, 'V': 20, 'W': 21, 'X': 22, 'Z': 23 };
               const up = record.toUpperCase();
-              if (dict[up] === undefined || !this.answerItem[index].column[dict[up]]) {
+              if (LETTER_INDEX[up] === undefined || !this.answerItem[index].column[LETTER_INDEX[up]]) {
                 await session.send(at + '[×] 选项不存在，请选择题目给出的选项（先 @我 再 /回答 A）');
                 return;
               }
@@ -879,6 +1011,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
               guildId: session.guildId || '',
             } as AnswerEntry;
             this.currentAnswered = true;
+            this.lastInteractAt = Date.now();
+            touchActivity();
             config.debug && console.log(`[作答记录] 第${index + 1}题 用户${uid}: ${record}`);
             await session.send(at + '已收到你的答案，作答时间结束后公布结果');
           }
@@ -1025,7 +1159,11 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
         await session.send(at + '请输入选项，例如 /回答 A');
         return;
       }
-      const temp = answerClass.getGuildList(session.guildId);
+      const temp = answerClass.peekGuild(session.guildId);
+      if (!temp?.isUse) {
+        await session.send(at + '还未开始抢答游戏，请先 @我 再发送 /开始抢答');
+        return;
+      }
       await temp.checkAnswerRight(select, session);
     });
   ctx
@@ -1079,6 +1217,272 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       return '你没有权限执行此操作，需要管理员';
     }
     return null;
+  }
+
+  type DailyRow = {
+    guildId: string
+    enabled: boolean
+    quizName: string
+    sendTime: string
+    settleTime: string
+    count: number
+    cursor: number
+    lastSend: string
+    lastSettle: string
+    todayJson: string
+  }
+  type DailyToday = {
+    date: string
+    quizName: string
+    questions: QuizQuestion[]
+    answers: Record<string, { qq: string; nickname: string; parts: string[]; raw: string }>
+  }
+
+  function emptyDaily(guildId: string): DailyRow {
+    return {
+      guildId: String(guildId),
+      enabled: false,
+      quizName: '',
+      sendTime: '09:00',
+      settleTime: '21:00',
+      count: 5,
+      cursor: 0,
+      lastSend: '',
+      lastSettle: '',
+      todayJson: '',
+    }
+  }
+
+  async function loadDaily(guildId: string): Promise<DailyRow> {
+    const rows = await ctx.database.get('daily_quiz', { guildId: String(guildId) })
+    return rows[0] ? { ...emptyDaily(guildId), ...rows[0] } : emptyDaily(guildId)
+  }
+
+  async function saveDaily(row: DailyRow) {
+    await ctx.database.upsert('daily_quiz', [row])
+  }
+
+  function parseToday(row: DailyRow): DailyToday | null {
+    if (!row.todayJson) return null
+    try {
+      const data = JSON.parse(row.todayJson)
+      if (!data?.questions?.length) return null
+      return data
+    } catch {
+      return null
+    }
+  }
+
+  function bankItems(name: string): QuizQuestion[] {
+    const bank = answerClass.localAnswer[name]
+    if (!bank?.content) return []
+    return Object.keys(bank.content)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((k) => bank.content[k])
+      .filter(Boolean)
+  }
+
+  function formatDailyQuestion(q: QuizQuestion, i: number) {
+    const lines = [`${i + 1}. ${q.ask}`]
+    if (q.column?.length) {
+      for (let k = 0; k < q.column.length; k++) {
+        const letter = OPTION_LETTERS[k]
+        if (!letter) break
+        lines.push(`${letter}. ${q.column[k]}`)
+      }
+    } else {
+      lines.push('（填空）')
+    }
+    return lines.join('\n')
+  }
+
+  async function sendGuildText(guildId: string, content: any) {
+    for (const bot of ctx.bots) {
+      try {
+        await bot.sendMessage(String(guildId), content)
+        return true
+      } catch (e: any) {
+        config.debug && console.log(`[每日发题] 发送失败 ${guildId}:`, e?.message)
+      }
+    }
+    return false
+  }
+
+  function dailyOpen(row: DailyRow) {
+    const today = parseToday(row)
+    return !!(today && row.lastSend && row.lastSettle !== row.lastSend)
+  }
+
+  async function dailySend(row: DailyRow, via?: any) {
+    if (!config.useLocal) return '每日发题只支持本地题库（请把 useLocal 设为 true）'
+    const date = todayStr()
+    const existing = parseToday(row)
+    if (row.lastSend === date && existing && row.lastSettle === row.lastSend) {
+      return '今日已经发过并结算了'
+    }
+    const buildBody = (picked: QuizQuestion[], quizName: string) => [
+      `【每日发题】${date} · ${quizName} · 共 ${picked.length} 题`,
+      `请在 ${row.settleTime} 前用一条消息作答：`,
+      `/每日回答 A B C（空格分隔；填空题含空格请用逗号分隔）`,
+      '',
+      ...picked.map((q, i) => formatDailyQuestion(q, i)),
+    ].join('\n')
+    if (row.lastSend === date && existing?.questions?.length) {
+      const body = buildBody(existing.questions, existing.quizName || row.quizName)
+      if (via) await via.send(body)
+      else await sendGuildText(row.guildId, body)
+      return ''
+    }
+    await ensureQuizLoaded()
+    if (!row.quizName) return '请先设置题库：/每日发题 题库 名称'
+    const items = bankItems(row.quizName)
+    if (!items.length) return `题库「${row.quizName}」不存在或为空，发送 /答题题目 查看`
+    const n = Math.max(1, Math.min(row.count || 5, items.length))
+    const picked: QuizQuestion[] = []
+    let cur = row.cursor % items.length
+    for (let i = 0; i < n; i++) {
+      picked.push(items[cur])
+      cur = (cur + 1) % items.length
+    }
+    row.cursor = cur
+    row.lastSend = date
+    row.todayJson = JSON.stringify({
+      date,
+      quizName: row.quizName,
+      questions: picked,
+      answers: {},
+    })
+    await saveDaily(row)
+    const body = buildBody(picked, row.quizName)
+    if (via) await via.send(body)
+    else await sendGuildText(row.guildId, body)
+    return ''
+  }
+
+  async function dailySettle(row: DailyRow, via?: any) {
+    const today = parseToday(row)
+    if (!today?.questions?.length) return '今日还没有发题，无法结算'
+    if (row.lastSettle === row.lastSend) return '今日已经结算过了'
+    const letters = OPTION_LETTERS
+    const qLines: string[] = []
+    const stats: Record<string, { right: number; wrong: number; nickname: string }> = {}
+    const historyRows: any[] = []
+    const now = Date.now()
+    const sessionId = Number(String(row.lastSend).replace(/-/g, '')) || now
+    for (let i = 0; i < today.questions.length; i++) {
+      const q = today.questions[i]
+      const correctList = (q.susses || []).map((s) => s.replace(/\s/g, ''))
+      const answerText = (q.susses || []).map((s) => {
+        const norm = s.replace(/\s/g, '')
+        if (q.column?.length) {
+          const idx = q.column.findIndex((c) => c.replace(/\s/g, '') === norm)
+          if (idx >= 0) return `${letters[idx]}. ${s}`
+        }
+        return s
+      }).join(' / ')
+      qLines.push(`${i + 1}. ${answerText}`)
+      for (const [uid, rec] of Object.entries(today.answers || {})) {
+        const part = rec.parts?.[i] || ''
+        const isRight = correctList.includes(normalizeQuizAnswer(part, q))
+        stats[uid] ||= { right: 0, wrong: 0, nickname: rec.nickname }
+        if (isRight) {
+          stats[uid].right++
+          if (q.mark) {
+            try { await ctx.monetary.gain(Number(uid), q.mark) } catch { /* ignore */ }
+          }
+        } else {
+          stats[uid].wrong++
+        }
+        historyRows.push({
+          qq: rec.qq || '',
+          nickname: rec.nickname || `用户${uid}`,
+          uid: Number(uid),
+          guildId: row.guildId,
+          quizGuild: today.quizName || row.quizName,
+          questionIndex: i,
+          ask: q.ask || '',
+          userAnswer: part,
+          isCorrect: isRight,
+          answeredAt: now,
+          sessionId,
+        })
+      }
+    }
+    if (historyRows.length) {
+      try { await ctx.database.upsert('answer_history', historyRows) } catch (e: any) {
+        config.debug && console.log('[每日发题] 写记录失败', e?.message)
+      }
+    }
+    row.lastSettle = row.lastSend
+    await saveDaily(row)
+    const rank = Object.entries(stats)
+      .sort((a, b) => b[1].right - a[1].right)
+      .map(([_, s], i) => `${i + 1}. ${s.nickname} 对${s.right} 错${s.wrong}`)
+    const msg = [
+      `【每日发题结算】${row.lastSend} · ${today.quizName}`,
+      '正确答案：',
+      ...qLines,
+      '',
+      rank.length ? `作答人数 ${rank.length}：\n${rank.join('\n')}` : '无人作答',
+    ].join('\n')
+    if (via) await via.send(msg)
+    else await sendGuildText(row.guildId, msg)
+    return ''
+  }
+
+  function dailyStatus(row: DailyRow) {
+    const today = parseToday(row)
+    const open = dailyOpen(row)
+    const nAns = today ? Object.keys(today.answers || {}).length : 0
+    return [
+      `每日发题：${row.enabled ? '已开启' : '已关闭'}`,
+      `题库：${row.quizName || '未设置'}`,
+      `每天 ${row.sendTime} 发 ${row.count} 题，${row.settleTime} 结算`,
+      `进度游标：${row.cursor}`,
+      `今日：${row.lastSend === todayStr() ? (open ? `已发题，${nAns} 人已作答，未结算` : row.lastSettle === row.lastSend ? '已结算' : '已发题') : '尚未发题'}`,
+      '作答：/每日回答 A B C',
+      '管理：/每日发题 开启|关闭|时间 09:00|结算 21:00|题数 5|题库 名称|现在发|现在结算',
+    ].join('\n')
+  }
+
+  function shouldDailySend(row: DailyRow, now = new Date()) {
+    if (!row.enabled || !row.quizName) return false
+    if (row.lastSend === todayStr(now)) return false
+    const hm = hmNow(now)
+    if (hm < row.sendTime) return false
+    if (row.settleTime > row.sendTime && hm >= row.settleTime) return false
+    return true
+  }
+
+  function shouldDailySettle(row: DailyRow, now = new Date()) {
+    if (!row.lastSend || row.lastSettle === row.lastSend) return false
+    const hm = hmNow(now)
+    if (row.settleTime > row.sendTime) {
+      return todayStr(now) === row.lastSend && hm >= row.settleTime
+    }
+    return todayStr(now) > row.lastSend && hm >= row.settleTime
+  }
+
+  let dailyTickBusy = false
+  async function dailyTick() {
+    if (dailyTickBusy) return
+    dailyTickBusy = true
+    try {
+      const rows = await ctx.database.get('daily_quiz', {})
+      for (const raw of rows) {
+        const row = { ...emptyDaily(raw.guildId), ...raw }
+        try {
+          if (shouldDailySend(row)) await dailySend(row)
+          else if (shouldDailySettle(row)) await dailySettle(row)
+        } catch (e: any) {
+          config.debug && console.log(`[每日发题] ${row.guildId} 失败:`, e?.message)
+        }
+      }
+    } catch (e: any) {
+      config.debug && console.log('[每日发题] tick 失败:', e?.message)
+    } finally {
+      dailyTickBusy = false
+    }
   }
 
   ctx
@@ -1137,8 +1541,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
         await session.send(at + denied);
         return;
       }
-      const temp = answerClass.getGuildList(session.guildId);
-      if (!temp.isUse) {
+      const temp = answerClass.peekGuild(session.guildId);
+      if (!temp?.isUse) {
         await session.send(at + '还未开始答题');
         return;
       }
@@ -1159,8 +1563,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
         await session.send(at + denied);
         return;
       }
-      const temp = answerClass.getGuildList(session.guildId);
-      if (!temp.isUse) {
+      const temp = answerClass.peekGuild(session.guildId);
+      if (!temp?.isUse) {
         await session.send(at + '还未开始答题');
         return;
       }
@@ -1181,8 +1585,8 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
         await session.send(at + denied);
         return;
       }
-      const temp = answerClass.getGuildList(session.guildId);
-      if (!temp.isUse) {
+      const temp = answerClass.peekGuild(session.guildId);
+      if (!temp?.isUse) {
         await session.send(at + '似乎还没开始答题..');
         return;
       }
@@ -1225,6 +1629,9 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
     .action(async ({ session }) => {
       const at = mention(session)
       await answerClass.init()
+      sleepState.quizLoaded = true
+      sleepState.asleep = false
+      scheduleIdleSleep()
       const answer = answerClass.answerMenu
       const msg = answer.map(item => {
         return `${item.pic ? `${h.image(item.pic)}\n` : ''}${item.guild}\n${item.msg}\n题目数量：${item.len}`
@@ -1249,8 +1656,202 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       const lines = users.map((u, i) => `${i + 1}. ${u.nickname}（${u.qq}）`);
       await session.send(at + `已注册用户（共 ${users.length} 人）：\n${lines.join('\n')}`);
     })
+  ctx
+    .command('休眠')
+    .action(async ({ session }) => {
+      const at = mention(session)
+      const denied = checkAdmin(session, at)
+      if (denied) {
+        await session.send(at + denied)
+        return
+      }
+      if (hasActiveGame()) {
+        await session.send(at + '有答题正在进行，请先 /结束抢答 再休眠')
+        return
+      }
+      enterSleep('manual')
+      await session.send(at + '已进入休眠：题库已卸载，空闲房间已回收。发送 /唤醒 或 /开始抢答 可恢复')
+    })
+  ctx
+    .command('唤醒')
+    .action(async ({ session }) => {
+      const at = mention(session)
+      await wake('manual')
+      const n = answerClass.answerMenu?.length || 0
+      await session.send(at + `已唤醒，题库已加载（${n} 套）`)
+    })
+  ctx
+    .command('休眠状态')
+    .action(async ({ session }) => {
+      const at = mention(session)
+      await session.send(at + formatSleepStatus())
+    })
+
+  ctx
+    .command('每日发题 [args:text]')
+    .alias('每日一题')
+    .action(async ({ session }, args) => {
+      const at = mention(session)
+      if (!session.guildId) {
+        await session.send(at + '请在群聊中使用每日发题')
+        return
+      }
+      const row = await loadDaily(session.guildId)
+      const text = (args || '').trim()
+      if (!text) {
+        await session.send(at + dailyStatus(row))
+        return
+      }
+      const denied = checkAdmin(session, at)
+      if (denied) {
+        await session.send(at + denied)
+        return
+      }
+      const sp = text.split(/\s+/)
+      const verb = sp[0]
+      const rest = sp.slice(1).join(' ').trim()
+      if (verb === '开启') {
+        if (!config.useLocal) {
+          await session.send(at + '每日发题只支持本地题库')
+          return
+        }
+        await ensureQuizLoaded()
+        const name = rest || row.quizName || (answerClass.answerMenu.length === 1 ? answerClass.answerMenu[0].guild : '')
+        if (!name) {
+          await session.send(at + '请指定题库：/每日发题 开启 题库名\n当前题库：' + (answerClass.answerMenu.map((x: any) => x.guild).join('、') || '无'))
+          return
+        }
+        if (!bankItems(name).length) {
+          await session.send(at + `题库「${name}」不存在，发送 /答题题目 查看`)
+          return
+        }
+        row.enabled = true
+        row.quizName = name
+        await saveDaily(row)
+        await session.send(at + `已开启每日发题\n${dailyStatus(row)}`)
+        return
+      }
+      if (verb === '关闭') {
+        row.enabled = false
+        await saveDaily(row)
+        await session.send(at + '已关闭每日发题（今日已发出的题仍可作答，到点仍会结算）')
+        return
+      }
+      if (verb === '时间') {
+        const t = parseHm(rest)
+        if (!t) {
+          await session.send(at + '时间格式：/每日发题 时间 09:00')
+          return
+        }
+        if (row.settleTime && t >= row.settleTime) {
+          await session.send(at + `发题时间须早于结算时间（当前结算 ${row.settleTime}）`)
+          return
+        }
+        row.sendTime = t
+        await saveDaily(row)
+        await session.send(at + `发题时间已设为 ${t}`)
+        return
+      }
+      if (verb === '结算') {
+        const t = parseHm(rest)
+        if (!t) {
+          await session.send(at + '时间格式：/每日发题 结算 21:00')
+          return
+        }
+        if (row.sendTime && t <= row.sendTime) {
+          await session.send(at + `结算时间须晚于发题时间（当前发题 ${row.sendTime}）`)
+          return
+        }
+        row.settleTime = t
+        await saveDaily(row)
+        await session.send(at + `结算时间已设为 ${t}`)
+        return
+      }
+      if (verb === '题数') {
+        const n = parseInt(rest, 10)
+        if (!n || n < 1 || n > 20) {
+          await session.send(at + '题数请设 1～20：/每日发题 题数 5')
+          return
+        }
+        row.count = n
+        await saveDaily(row)
+        await session.send(at + `每天题数已设为 ${n}`)
+        return
+      }
+      if (verb === '题库') {
+        if (!rest) {
+          await session.send(at + '用法：/每日发题 题库 名称')
+          return
+        }
+        await ensureQuizLoaded()
+        if (!bankItems(rest).length) {
+          await session.send(at + `题库「${rest}」不存在，发送 /答题题目 查看`)
+          return
+        }
+        row.quizName = rest
+        row.cursor = 0
+        await saveDaily(row)
+        await session.send(at + `题库已设为「${rest}」，进度游标已归零`)
+        return
+      }
+      if (verb === '现在发') {
+        const err = await dailySend(row, session)
+        if (err) await session.send(at + err)
+        return
+      }
+      if (verb === '现在结算') {
+        const err = await dailySettle(row, session)
+        if (err) await session.send(at + err)
+        return
+      }
+      await session.send(at + '未知参数。' + dailyStatus(row))
+    })
+
+  ctx
+    .command('每日回答 <option:text>')
+    .alias('日答')
+    .userFields(['id']).action(async ({ session }, option) => {
+      const at = mention(session)
+      if (!session.guildId) {
+        await session.send(at + '请在群聊中作答每日发题')
+        return
+      }
+      const row = await loadDaily(session.guildId)
+      const today = parseToday(row)
+      if (!dailyOpen(row) || !today) {
+        await session.send(at + '当前没有进行中的每日发题')
+        return
+      }
+      const n = today.questions.length
+      const parts = parseDailyAnswers(option || '', n)
+      if (!parts) {
+        await session.send(at + `请在一条消息里回答全部 ${n} 题，例如 /每日回答 A B C`)
+        return
+      }
+      for (let i = 0; i < n; i++) {
+        const q = today.questions[i]
+        if (q.column?.length) {
+          const up = parts[i].replace(/\s/g, '').toUpperCase()
+          if (LETTER_INDEX[up] === undefined || !q.column[LETTER_INDEX[up]]) {
+            await session.send(at + `[×] 第 ${i + 1} 题选项不存在，请填写题目给出的字母`)
+            return
+          }
+        }
+      }
+      const userProfile = await ensureRegistered(session)
+      today.answers[String(session.user.id)] = {
+        qq: userProfile.qq || session.userId || '',
+        nickname: userProfile.nickname,
+        parts,
+        raw: String(option || ''),
+      }
+      row.todayJson = JSON.stringify(today)
+      await saveDaily(row)
+      await session.send(at + `已收到你的 ${n} 题答案，${row.settleTime} 统一公布（重复提交以最后一次为准）`)
+    })
   // 支持直接 /A /B 等单字母作答（游戏进行中；含 markdown 链接点击发送，无需 @）
   ctx.middleware(async (session, next) => {
+    if (sleepState.asleep) return next()
     const text = (session.stripped?.content || session.content || '').trim()
     const m = text.match(/^\/([A-Ha-h])$/)
     if (!m) return next()
@@ -1282,7 +1883,12 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       `/跳到 题号 - 快进到指定题（管理员，跳过中间题不结算）\n` +
       `/结束抢答 - 结束整局并结算（管理员）\n` +
       `/答题题目 - 查看题库列表\n` +
-      `/用户列表 - 查看已注册用户（管理员）`)
+      `/用户列表 - 查看已注册用户（管理员）\n` +
+      `/每日发题 - 查看/设置每日发题（管理员可改时间、题数、题库）\n` +
+      `/每日回答 A B C - 一条消息回答当日全部每日题\n` +
+      `/休眠 - 立即卸载题库、回收内存（管理员）\n` +
+      `/唤醒 - 立即加载题库\n` +
+      `/休眠状态 - 查看休眠与题库加载状态`)
     // 不返回任何值，避免把 send 的消息 ID 当作回复内容再次发送
     return
   })
@@ -1313,8 +1919,140 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
     }
     return arrAdd;
   }
+  function hasActiveGame() {
+    return Object.values(answerClass.guildList).some((g: any) => g?.isUse)
+  }
+
+  function touchActivity() {
+    sleepState.lastActiveAt = Date.now()
+    if (sleepState.asleep || hasActiveGame()) return
+    scheduleIdleSleep()
+  }
+
+  function cancelIdleSleep() {
+    if (sleepState.idleTimer) {
+      sleepState.idleTimer()
+      sleepState.idleTimer = null
+    }
+  }
+
+  function scheduleIdleSleep() {
+    const opt = sleepOpt()
+    cancelIdleSleep()
+    if (!opt.enabled || opt.idleMinutes <= 0) return
+    if (sleepState.asleep) return
+    const wait = opt.idleMinutes * 60 * 1000
+    sleepState.idleTimer = ctx.setTimeout(() => {
+      if (hasActiveGame()) {
+        scheduleIdleSleep()
+        return
+      }
+      enterSleep('idle')
+    }, wait)
+  }
+
+  function pruneIdleRooms() {
+    const keep = new Set<any>()
+    for (const room of Object.values(answerClass.guildList) as any[]) {
+      if (room?.isUse) keep.add(room)
+    }
+    for (const id of Object.keys(answerClass.guildList)) {
+      if (!keep.has(answerClass.guildList[id])) delete answerClass.guildList[id]
+    }
+    if (!keep.size) {
+      answerClass.playUser = {}
+      privateList.idList = {}
+    }
+  }
+
+  function enterSleep(reason: string) {
+    if (hasActiveGame()) return
+    const opt = sleepOpt()
+    cancelIdleSleep()
+    sleepState.asleep = true
+    sleepState.reason = reason
+    pruneIdleRooms()
+    if (opt.unloadQuiz) {
+      answerClass.localAnswer = {}
+      answerClass.answerMenu = []
+      sleepState.quizLoaded = false
+    }
+    try {
+      const gc = (globalThis as any).gc
+      if (typeof gc === 'function') gc()
+    } catch { /* ignore */ }
+    config.debug && console.log(`[休眠] 进入休眠（${reason}）`)
+  }
+
+  async function ensureQuizLoaded() {
+    if (sleepState.quizLoaded) {
+      sleepState.asleep = false
+      return
+    }
+    if (sleepState.loading) return sleepState.loading
+    sleepState.loading = (async () => {
+      await answerClass.init()
+      sleepState.quizLoaded = true
+      sleepState.asleep = false
+      sleepState.loading = null
+      config.debug && console.log('[休眠] 题库已加载')
+    })().catch((e) => {
+      sleepState.loading = null
+      throw e
+    })
+    return sleepState.loading
+  }
+
+  async function wake(reason: string) {
+    await ensureQuizLoaded()
+    sleepState.asleep = false
+    sleepState.reason = reason
+    touchActivity()
+    config.debug && console.log(`[休眠] 已唤醒（${reason}）`)
+  }
+
+  function formatSleepStatus() {
+    const opt = sleepOpt()
+    const rooms = Object.values(answerClass.guildList) as any[]
+    const unique = [...new Set(rooms)]
+    const active = unique.filter((g) => g?.isUse).length
+    const idleMin = opt.idleMinutes
+    const lines = [
+      `状态：${sleepState.asleep ? '休眠中' : '运行中'}（${sleepState.reason}）`,
+      `题库：${sleepState.quizLoaded ? `已加载（${answerClass.answerMenu?.length || 0} 套）` : '已卸载'}`,
+      `进行中的对局：${active}`,
+      `空闲房间：${Math.max(0, unique.length - active)}`,
+    ]
+    if (!opt.enabled) {
+      lines.push('自动休眠：已关闭')
+    } else if (idleMin <= 0) {
+      lines.push('自动休眠：不自动休眠（仅手动 /休眠）')
+    } else {
+      lines.push(`自动休眠：空闲 ${idleMin} 分钟后卸载题库`)
+    }
+    if (opt.autoEndIdleGameMinutes > 0) {
+      lines.push(`对局看门狗：无人作答 ${opt.autoEndIdleGameMinutes} 分钟后自动结束`)
+    }
+    return lines.join('\n')
+  }
+
   ctx.on('ready', async () => {
-    await answerClass.init();
-  });
+    const opt = sleepOpt()
+    if (opt.enabled && opt.startAsleep) {
+      sleepState.asleep = true
+      sleepState.quizLoaded = false
+      sleepState.reason = 'boot'
+      config.debug && console.log('[休眠] 启动时保持休眠，题库延迟加载')
+      ctx.setInterval(() => { dailyTick() }, 30000)
+      return
+    }
+    await ensureQuizLoaded()
+    scheduleIdleSleep()
+    ctx.setInterval(() => { dailyTick() }, 30000)
+  })
+
+  ctx.on('dispose', () => {
+    cancelIdleSleep()
+  })
 }
 

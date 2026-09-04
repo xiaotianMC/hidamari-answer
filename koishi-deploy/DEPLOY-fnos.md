@@ -1,7 +1,7 @@
-# fnOS（飞牛）部署 Koishi + smmcat-answer 答题机器人
+# fnOS（飞牛）部署 Koishi + hidamari-question 答题机器人
 
 本文档提供在飞牛私有云（fnOS）上部署「群内答题」机器人的完整步骤。
-架构：**Koishi（机器人框架）+ NapCat（QQ 协议桥）+ smmcat-answer（答题插件）**，全部以 Docker 容器运行，7×24 常驻。
+架构：**Koishi（机器人框架）+ NapCat（QQ 协议桥）+ hidamari-question（答题插件）**，全部以 Docker 容器运行，7×24 常驻。
 
 ---
 
@@ -19,12 +19,12 @@
                                               │ 插件
                                     ┌─────────┼─────────┐
                                     ▼         ▼         ▼
-                             smmcat-answer  monetary  database-sqlite
+                             hidamari-question  monetary  database-sqlite
 ```
 
 - **NapCat**：负责与 QQ 服务器通信（登录机器人 QQ），通过 OneBot 协议转发消息
 - **Koishi**：机器人框架，运行答题插件，提供网页控制台（装插件、配置、日志）
-- **smmcat-answer**：答题插件本体；**monetary** 为其必需的积分依赖；**database-sqlite** 持久化数据
+- **hidamari-question**：答题插件本体；**monetary** 为其必需的积分依赖；**database-sqlite** 持久化数据
 
 ---
 
@@ -137,7 +137,7 @@ networks:
    - `@koishijs/plugin-database-sqlite`（数据库）
    - `koishi-plugin-monetary`（积分，答题插件依赖）
    - `@koishijs/plugin-adapter-onebot`（QQ 接入）
-   - `koishi-plugin-smmcat-answer`（答题插件本体）
+   - `koishi-plugin-hidamari-question`（答题插件本体）
 3. 在「插件配置」中逐个启用：
 
 **adapter-onebot（OneBot 适配器）** —— 关键配置：
@@ -158,7 +158,7 @@ path: ./data/koishi.db           # 默认即可，文件保存在 /koishi/data/ 
 # 留空即可，使用默认配置
 ```
 
-**smmcat-answer（答题插件）**：
+**hidamari-question（答题插件）**：
 ```yaml
 useLocal: true                    # 推荐：使用本地题库（离线稳定）
 localPath: ./data/answerData      # 本地题库存放目录（容器内自动创建）
@@ -188,7 +188,7 @@ debug: false                      # 调试日志
 - 同一题重复作答以最后一次提交为准
 - 答对者获得积分（monetary），连击额外加分；不公布谁对谁错
 
-4. 全部启用后，控制台顶部应显示一个在线 bot；左侧「日志」中可看到 `smmcat-answer` 初始化日志（首次运行会在 `/koishi/data/answerData/` 自动生成 `test.json` 测试题库）。
+4. 全部启用后，控制台顶部应显示一个在线 bot；左侧「日志」中可看到 `hidamari-question` 初始化日志（首次运行会在 `/koishi/data/answerData/` 自动生成 `test.json` 测试题库）。
 
 ---
 
@@ -210,7 +210,7 @@ debug: false                      # 调试日志
 | 问题 | 处理 |
 |---|---|
 | 控制台里 bot 显示离线 | 检查 NapCat 是否已登录；检查两容器网络是否互通（compose 方式无此问题）；看 Koishi「日志」中的 onebot 报错 |
-| 插件报 `cannot resolve koishi-plugin-monetary` 之类 | 确认 monetary 已先于 smmcat-answer 安装启用（inject 依赖） |
+| 插件报 `cannot resolve koishi-plugin-monetary` 之类 | 确认 monetary 已先于 hidamari-question 安装启用（inject 依赖） |
 | 答题时无响应或报网络错误 | 插件默认走云端题库（`http://182.92.130.139:8081`，作者服务器，可能不稳定）→ 强烈建议 `useLocal: true` 用本地题库 |
 | 本地题库为空 | 首次运行自动生成 `test.json` 演示题库；可参照其 JSON 格式自行添加题库文件到 `data/answerData/` |
 | 更新插件 | 直接在 Koishi 控制台「插件市场」里更新；容器镜像更新仅影响 Node/Chromium 版本，数据不受影响 |
@@ -232,5 +232,5 @@ debug: false                      # 调试日志
 - Koishi 容器部署官方文档：https://koishi.chat/zh-CN/manual/starter/docker.html
 - Koishi 插件市场：https://registry.koishi.chat
 - NapCat-Docker 项目：https://github.com/NapNeko/NapCat-Docker
-- smmcat-answer 论坛帖：[smmcat-answer：在群内答题](https://forum.koishi.xyz/t/topic/8084)
-- smmcat-answer 源码：https://github.com/smmcat/smmcat-answer
+- 原插件论坛帖：[smmcat-answer：在群内答题](https://forum.koishi.xyz/t/topic/8084)
+- 原插件源码：https://github.com/smmcat/smmcat-answer
