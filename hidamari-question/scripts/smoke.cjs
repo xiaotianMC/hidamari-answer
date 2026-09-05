@@ -109,6 +109,7 @@ app.plugin(answer, {
   autoNext: 2,
   debug: true,
   adminQQ: ['111111111'], // user1 是管理员
+  superAdminQQ: ['111111111'], // user1 也是超级管理员
   sleep: {
     enabled: true,
     idleMinutes: 0,
@@ -129,9 +130,13 @@ async function main() {
   const user2 = app.mock.client('222222222', '987654321')
   const say = (cmd) => `<at id="514"/> ${cmd}`
 
+  const rChat = await admin.receive('注册')
+  console.log('[smoke] 无斜杠无@ 注册 ->', JSON.stringify(rChat))
+  const ignoredPlain = rChat.length === 0
+
   const rBare = await admin.receive('/注册')
   console.log('[smoke] 未@ /注册 ->', JSON.stringify(rBare))
-  const ignoredWithoutAt = rBare.length === 0
+  all.push(...rBare)
 
   // 1. 管理员注册
   const r0 = await admin.receive(say('/注册'))
@@ -150,6 +155,22 @@ async function main() {
   const rU2 = await admin.receive(say('/用户列表'))
   console.log('[smoke] 管理员 /用户列表 ->', JSON.stringify(rU2))
   all.push(...rU2)
+
+  const rAddDeny = await user2.receive('/添加管理员 333333333')
+  console.log('[smoke] 非超管 /添加管理员 ->', JSON.stringify(rAddDeny))
+  all.push(...rAddDeny)
+  const rAdd = await admin.receive('/添加管理员 222222222')
+  console.log('[smoke] /添加管理员 ->', JSON.stringify(rAdd))
+  all.push(...rAdd)
+  const rU3 = await user2.receive('/用户列表')
+  console.log('[smoke] 新管理员 /用户列表 ->', JSON.stringify(rU3))
+  all.push(...rU3)
+  const rAdmins = await admin.receive('/管理员列表')
+  console.log('[smoke] /管理员列表 ->', JSON.stringify(rAdmins))
+  all.push(...rAdmins)
+  const rRm = await admin.receive('/移除管理员 222222222')
+  console.log('[smoke] /移除管理员 ->', JSON.stringify(rRm))
+  all.push(...rRm)
 
   // 1.3b @机器人 我的账号（无 /）→ 应正常执行
   const rAccNoSlash = await admin.receive('<at id="514"/> 我的账号')
@@ -203,8 +224,11 @@ async function main() {
   const rDailyOn = await admin.receive(say('/每日发题 开启 测试题'))
   console.log('[smoke] /每日发题 开启 ->', JSON.stringify(rDailyOn))
   all.push(...rDailyOn)
-  const rDailyN = await admin.receive(say('/每日发题 题数 2'))
-  console.log('[smoke] /每日发题 题数 ->', JSON.stringify(rDailyN))
+  const rDailyOnMsg = await admin.receive(say('/每日发题 开启《冒烟测试题库》'))
+  console.log('[smoke] /每日发题 开启《简介》 ->', JSON.stringify(rDailyOnMsg))
+  all.push(...rDailyOnMsg)
+  const rDailyN = await admin.receive(say('/每日发题 题数2'))
+  console.log('[smoke] /每日发题 题数2 ->', JSON.stringify(rDailyN))
   all.push(...rDailyN)
   const rDailySend = await admin.receive(say('/每日发题 现在发'))
   console.log('[smoke] /每日发题 现在发 ->', JSON.stringify(rDailySend))
@@ -286,17 +310,22 @@ async function main() {
 
   const text = all.join('\n')
   const ok =
-    ignoredWithoutAt &&                    // 未 @ 的 /指令无效
+    ignoredPlain &&                        // 无 / 且未 @ 不执行
     notTriggered &&                        // @其他人不触发帮助
     text.includes('注册成功') &&
     text.includes('你已注册过了') &&       // 重复注册提示
     text.includes('已注册用户') &&         // 用户列表
+    text.includes('需要超级管理员') &&
+    text.includes('已添加管理员 222222222') &&
+    text.includes('已移除管理员 222222222') &&
+    text.includes('群内添加') &&
     text.includes('答题机器人指令') &&     // @机器人帮助
     text.includes('还未开始抢答游戏') &&       // 未开始游戏时作答
     text.includes('你没有权限执行此操作') &&
     text.includes('未绑定其他群') &&
     text.includes('876543210') &&
     text.includes('已开启每日发题') &&
+    text.includes('每天题数已设为 2') &&
     text.includes('【每日发题】') &&
     text.includes('已收到你的 2 题答案') &&
     text.includes('【每日发题结算】') &&

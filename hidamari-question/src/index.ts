@@ -40,6 +40,10 @@ declare module 'koishi' {
       lastSettle: string
       todayJson: string
     }
+    /** 超级管理员在群内添加的额外管理员（配置里的 adminQQ / superAdminQQ 不在此表） */
+    answer_admin: {
+      qq: string
+    }
   }
 }
 
@@ -125,6 +129,8 @@ export interface Config {
   autoNext: number;
   useGlobalNick: boolean;
   adminQQ: string[];
+  /** 超级管理员：可在群内添加/移除管理员 */
+  superAdminQQ: string[];
   /** NapCat 普通 QQ 号下 markdown 可点击选项大多无效，默认关闭 */
   clickableOptions: boolean;
   /** 3 分题最先作答且答对可拿满分的人数，其余答对基础分减半 */
@@ -167,6 +173,7 @@ export const Config: Schema<Config> = Schema.object({
   autoNext: Schema.number().default(10).description('无人作答时自动进入下一题的秒数，0 表示不自动切题（一直等待）'),
   useGlobalNick: Schema.boolean().default(false).description('注册时固定使用平台昵称（全局统一昵称），关闭则优先使用当前群名片'),
   adminQQ: Schema.array(Schema.string()).default([]).description('管理员 QQ 号白名单（可执行开始/结束抢答、结束本题、跳到指定题等管理操作）'),
+  superAdminQQ: Schema.array(Schema.string()).default([]).description('超级管理员 QQ 号（含管理员权限，并可在群内 /添加管理员、/移除管理员）'),
   clickableOptions: Schema.boolean().default(false).description('尝试用合并转发+Markdown 发送可点击选项（仅官方 QQ 机器人/部分手机 QQ 可能有效；NapCat 普通号通常无效）'),
   highMarkFullCount: Schema.number().default(5).description('3 分题最先作答的若干人答对得满分，其余答对基础分减半'),
   sleep: Schema.object({
@@ -198,6 +205,15 @@ export function apply(ctx: Context, config: Config) {
     reason: 'boot',
     idleTimer: null as (() => void) | null,
     loading: null as Promise<void> | null,
+  }
+
+  const extraAdmins = new Set<string>()
+  async function loadExtraAdmins() {
+    extraAdmins.clear()
+    try {
+      const rows = await ctx.database.get('answer_admin', {})
+      for (const r of rows) extraAdmins.add(String(r.qq))
+    } catch { /* 表尚未就绪 */ }
   }
 
   /** 回复指令时 @ 发送者 */
@@ -262,7 +278,7 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  /** 群聊 @ 机器人后可直接发指令名，无需 / 前缀 */
+  /** @ 机器人后可直接发指令名，无需 / 前缀 */
   function normalizeAtCommand(session: any) {
     if (!session?.guildId) return
     if (!session.stripped?.atSelf) return
@@ -276,11 +292,12 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  /** 群聊须 @ 机器人；@ 后有无 / 均可 */
+  /** 群聊：不@时须 /指令；@我时带不带 / 都可以。私聊不限制。 */
   function isGroupCommandAllowed(session: any) {
     if (!session?.guildId) return true
-    if (!session.stripped?.atSelf) return false
-    return (session.stripped.content || '').trim().length > 0
+    if (session.stripped?.atSelf) return (session.stripped.content || '').trim().length > 0
+    const text = (session.stripped?.content || session.content || '').trim()
+    return text.startsWith('/')
   }
 
   const OPTION_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -344,26 +361,9 @@ export function apply(ctx: Context, config: Config) {
     return false
   }
 
-  // @ 机器人后自动补 /，支持「@我 开始抢答」与「@我 /开始抢答」
+  // @ 后自动补 /，支持「@我 注册」与「@我 /注册」
   ctx.middleware(async (session, next) => {
     normalizeAtCommand(session)
-    return next()
-  }, true)
-
-  // 群内未 @ 的 /指令直接吞掉，避免触发「未知指令」
-  ctx.middleware(async (session, next) => {
-    if (!session.guildId) return next()
-    if (session.stripped?.atSelf) return next()
-    const raw = (session.content || '').trim()
-    const rest = (session.stripped?.content || '').trim()
-    const cmd = rest || raw
-    // markdown 链接点击会发送 /A 等，游戏中无需 @
-    const quick = cmd.match(/^\/([A-H])$/i)
-    if (quick) {
-      const g = answerClass.guildList[session.guildId]
-      if (g?.isUse) return next()
-    }
-    if (raw.startsWith('/') || rest.startsWith('/')) return
     return next()
   }, true)
 
@@ -439,6 +439,10 @@ export function apply(ctx: Context, config: Config) {
     lastSettle: 'string',
     todayJson: 'text',
   }, { primary: 'guildId' })
+
+  ctx.model.extend('answer_admin', {
+    qq: 'string',
+  }, { primary: 'qq' })
 
   // 获取随机题目
   async function getRandomAnswer({ sed = '1', num = config.answersNumOfRush }) {
@@ -681,7 +685,7 @@ export function apply(ctx: Context, config: Config) {
               const selectMenu = answerMenu[random(0, answerMenu.length)]
               result = answerList[selectMenu.guild]
             } else {
-              result = answerList[guild]
+              result = answerList[resolveBank(guild).guild || guild]
             }
             if (!result) return false
             // 不再随机打乱：按题库顺序出全部题目，选项顺序保持不变
@@ -1166,6 +1170,20 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       }
       await temp.checkAnswerRight(select, session);
     });
+  for (const letter of 'ABCDEFGH') {
+    ctx.command(letter)
+      .userFields(['id']).action(async ({ session }) => {
+        const at = mention(session)
+        if (!session.guildId) session.guildId = privateList.getID(session.userId)
+        const temp = answerClass.peekGuild(session.guildId)
+        if (!temp?.isUse) {
+          await session.send(at + '还未开始抢答游戏，请先发送 /开始抢答')
+          return
+        }
+        config.debug && console.log(`[快捷作答] ${session.userId} -> ${letter}`)
+        await temp.checkAnswerRight(letter, session)
+      })
+  }
   ctx
     .command('注销')
     .userFields(['id']).action(async ({ session }) => {
@@ -1208,15 +1226,42 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       });
       await session.send(at + `你的答题记录（共 ${total} 条，答对 ${right} / 答错 ${wrong}，显示最近 ${recent.length} 条）：\n${lines.join('\n')}`);
     });
-  // 管理员校验（QQ 号白名单）
+  function uidOf(session: any) {
+    return String(session?.userId || '')
+  }
+  function inQQList(list: string[] | undefined, id: string) {
+    return (list || []).map(String).includes(String(id))
+  }
+  function isSuperAdmin(session: any) {
+    return inQQList(config.superAdminQQ, uidOf(session))
+  }
   function isAdmin(session: any) {
-    return config.adminQQ.includes(session.userId);
+    const id = uidOf(session)
+    return isSuperAdmin(session) || inQQList(config.adminQQ, id) || extraAdmins.has(id)
   }
   function checkAdmin(session: any, at: string) {
     if (!isAdmin(session)) {
       return '你没有权限执行此操作，需要管理员';
     }
     return null;
+  }
+  function checkSuperAdmin(session: any) {
+    if (!isSuperAdmin(session)) {
+      return '你没有权限执行此操作，需要超级管理员'
+    }
+    return null
+  }
+  function parseTargetQq(session: any, text: string) {
+    const self = String(session.selfId || session.bot?.selfId || session.bot?.user?.id || '')
+    const els = session.elements || session.event?.message?.elements || []
+    for (const el of els) {
+      if (el?.type === 'at' && el.attrs?.id) {
+        const id = String(el.attrs.id)
+        if (id && id !== self) return id
+      }
+    }
+    const m = String(text || '').match(/(\d{5,})/)
+    return m ? m[1] : ''
   }
 
   type DailyRow = {
@@ -1280,6 +1325,44 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       .sort((a, b) => Number(a) - Number(b))
       .map((k) => bank.content[k])
       .filter(Boolean)
+  }
+
+  function normQuiz(s: string) {
+    return String(s || '').replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase()
+  }
+
+  // ponytail: 题库 guild 很短、msg 很长，群里常把简介整段贴进来；唯一命中即可
+  function resolveBank(name: string): { guild: string, err?: string } {
+    const n = String(name || '').trim()
+    if (!n) return { guild: '' }
+    if (answerClass.localAnswer[n]?.content) return { guild: n }
+    const menus: any[] = answerClass.answerMenu || []
+    const exactGuild = menus.find((x) => x.guild === n)
+    if (exactGuild) return { guild: exactGuild.guild }
+    const exactMsg = menus.filter((x) => x.msg === n)
+    if (exactMsg.length === 1) return { guild: exactMsg[0].guild }
+    const q = normQuiz(n)
+    if (!q) return { guild: '' }
+    const eq = menus.filter((x) => normQuiz(x.guild) === q || normQuiz(x.msg || '') === q)
+    if (eq.length === 1) return { guild: eq[0].guild }
+    const part = [...new Set(menus.filter((x) => {
+      const g = normQuiz(x.guild)
+      const m = normQuiz(x.msg || '')
+      return (g && (g.includes(q) || q.includes(g))) || (m && (m.includes(q) || q.includes(m)))
+    }).map((x) => x.guild))]
+    if (part.length === 1) return { guild: part[0] }
+    if (part.length > 1) return { guild: '', err: '匹配到多套题库，请写准确名称：\n' + part.join('\n') }
+    return { guild: '' }
+  }
+
+  const DAILY_VERBS = ['现在结算', '现在发', '开启', '关闭', '时间', '结算', '题数', '题库']
+  function splitDailyArgs(text: string): [string, string] {
+    const t = text.trim()
+    for (const v of DAILY_VERBS) {
+      if (t === v || t.startsWith(v)) return [v, t.slice(v.length).trim()]
+    }
+    const sp = t.split(/\s+/)
+    return [sp[0], sp.slice(1).join(' ').trim()]
   }
 
   function formatDailyQuestion(q: QuizQuestion, i: number) {
@@ -1657,6 +1740,77 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       await session.send(at + `已注册用户（共 ${users.length} 人）：\n${lines.join('\n')}`);
     })
   ctx
+    .command('添加管理员 [qq:text]')
+    .action(async ({ session }, qq) => {
+      const at = mention(session)
+      const denied = checkSuperAdmin(session)
+      if (denied) {
+        await session.send(at + denied)
+        return
+      }
+      const target = parseTargetQq(session, qq || '')
+      if (!target) {
+        await session.send(at + '用法：/添加管理员 QQ号 或 /添加管理员 @对方')
+        return
+      }
+      if (inQQList(config.superAdminQQ, target) || inQQList(config.adminQQ, target) || extraAdmins.has(target)) {
+        await session.send(at + `${target} 已经是管理员`)
+        return
+      }
+      await ctx.database.upsert('answer_admin', [{ qq: target }])
+      extraAdmins.add(target)
+      await session.send(at + `已添加管理员 ${target}`)
+    })
+  ctx
+    .command('移除管理员 [qq:text]')
+    .action(async ({ session }, qq) => {
+      const at = mention(session)
+      const denied = checkSuperAdmin(session)
+      if (denied) {
+        await session.send(at + denied)
+        return
+      }
+      const target = parseTargetQq(session, qq || '')
+      if (!target) {
+        await session.send(at + '用法：/移除管理员 QQ号 或 /移除管理员 @对方')
+        return
+      }
+      if (inQQList(config.superAdminQQ, target)) {
+        await session.send(at + '不能移除超级管理员')
+        return
+      }
+      if (inQQList(config.adminQQ, target)) {
+        await session.send(at + `${target} 写在插件配置里，请到控制台修改 adminQQ`)
+        return
+      }
+      if (!extraAdmins.has(target)) {
+        await session.send(at + `${target} 不是群内添加的管理员`)
+        return
+      }
+      await ctx.database.remove('answer_admin', { qq: target })
+      extraAdmins.delete(target)
+      await session.send(at + `已移除管理员 ${target}`)
+    })
+  ctx
+    .command('管理员列表')
+    .action(async ({ session }) => {
+      const at = mention(session)
+      const denied = checkAdmin(session, at)
+      if (denied) {
+        await session.send(at + denied)
+        return
+      }
+      const supers = (config.superAdminQQ || []).map(String)
+      const conf = (config.adminQQ || []).map(String).filter((id) => !supers.includes(id))
+      const extra = [...extraAdmins].filter((id) => !supers.includes(id) && !conf.includes(id))
+      const lines = [
+        supers.length ? `超级管理员：${supers.join('、')}` : '超级管理员：未配置',
+        conf.length ? `配置管理员：${conf.join('、')}` : '',
+        extra.length ? `群内添加：${extra.join('、')}` : '群内添加：无',
+      ].filter(Boolean)
+      await session.send(at + lines.join('\n'))
+    })
+  ctx
     .command('休眠')
     .action(async ({ session }) => {
       const at = mention(session)
@@ -1707,26 +1861,29 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
         await session.send(at + denied)
         return
       }
-      const sp = text.split(/\s+/)
-      const verb = sp[0]
-      const rest = sp.slice(1).join(' ').trim()
+      const [verb, rest] = splitDailyArgs(text)
       if (verb === '开启') {
         if (!config.useLocal) {
           await session.send(at + '每日发题只支持本地题库')
           return
         }
         await ensureQuizLoaded()
-        const name = rest || row.quizName || (answerClass.answerMenu.length === 1 ? answerClass.answerMenu[0].guild : '')
-        if (!name) {
+        const raw = rest || row.quizName || (answerClass.answerMenu.length === 1 ? answerClass.answerMenu[0].guild : '')
+        if (!raw) {
           await session.send(at + '请指定题库：/每日发题 开启 题库名\n当前题库：' + (answerClass.answerMenu.map((x: any) => x.guild).join('、') || '无'))
           return
         }
-        if (!bankItems(name).length) {
-          await session.send(at + `题库「${name}」不存在，发送 /答题题目 查看`)
+        const found = resolveBank(raw)
+        if (found.err) {
+          await session.send(at + found.err)
+          return
+        }
+        if (!found.guild || !bankItems(found.guild).length) {
+          await session.send(at + `题库「${raw}」不存在，发送 /答题题目 查看`)
           return
         }
         row.enabled = true
-        row.quizName = name
+        row.quizName = found.guild
         await saveDaily(row)
         await session.send(at + `已开启每日发题\n${dailyStatus(row)}`)
         return
@@ -1784,11 +1941,16 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
           return
         }
         await ensureQuizLoaded()
-        if (!bankItems(rest).length) {
+        const found = resolveBank(rest)
+        if (found.err) {
+          await session.send(at + found.err)
+          return
+        }
+        if (!found.guild || !bankItems(found.guild).length) {
           await session.send(at + `题库「${rest}」不存在，发送 /答题题目 查看`)
           return
         }
-        row.quizName = rest
+        row.quizName = found.guild
         row.cursor = 0
         await saveDaily(row)
         await session.send(at + `题库已设为「${rest}」，进度游标已归零`)
@@ -1849,26 +2011,13 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       await saveDaily(row)
       await session.send(at + `已收到你的 ${n} 题答案，${row.settleTime} 统一公布（重复提交以最后一次为准）`)
     })
-  // 支持直接 /A /B 等单字母作答（游戏进行中；含 markdown 链接点击发送，无需 @）
-  ctx.middleware(async (session, next) => {
-    if (sleepState.asleep) return next()
-    const text = (session.stripped?.content || session.content || '').trim()
-    const m = text.match(/^\/([A-Ha-h])$/)
-    if (!m) return next()
-    if (!session.guildId) return next()
-    const g = answerClass.guildList[session.guildId]
-    if (!g || !g.isUse) return next()
-    config.debug && console.log(`[快捷作答] ${session.userId} -> ${m[1].toUpperCase()}`)
-    await g.checkAnswerRight(m[1].toUpperCase(), session)
-    return
-  })
   // 仅 @机器人自己（无其他内容）时回复指令帮助
   ctx.middleware(async (session, next) => {
     if (!session.stripped?.atSelf) return next()
     const content = session.stripped.content?.trim() || ''
     if (content) return next()
     await session.send(mention(session) + `【答题机器人指令】\n` +
-      `群聊请先 @我，再发送指令（可加 / 也可不加，如「注册」或「/注册」）\n` +
+      `不@我时发送 /指令；@我时带不带 / 都可以（如「注册」或「/注册」）\n` +
       `/注册 - 注册账号（昵称取群名片，首次答题也会自动注册）\n` +
       `/改名 新昵称 - 修改昵称\n` +
       `/我的账号 - 查看账号信息\n` +
@@ -1884,6 +2033,9 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
       `/结束抢答 - 结束整局并结算（管理员）\n` +
       `/答题题目 - 查看题库列表\n` +
       `/用户列表 - 查看已注册用户（管理员）\n` +
+      `/管理员列表 - 查看管理员（管理员）\n` +
+      `/添加管理员 QQ - 添加管理员（超级管理员）\n` +
+      `/移除管理员 QQ - 移除群内添加的管理员（超级管理员）\n` +
       `/每日发题 - 查看/设置每日发题（管理员可改时间、题数、题库）\n` +
       `/每日回答 A B C - 一条消息回答当日全部每日题\n` +
       `/休眠 - 立即卸载题库、回收内存（管理员）\n` +
@@ -2037,6 +2189,7 @@ ${detailLines.length ? `\n作答详情：\n${detailLines.join('\n')}\n` : ''}
   }
 
   ctx.on('ready', async () => {
+    await loadExtraAdmins()
     const opt = sleepOpt()
     if (opt.enabled && opt.startAsleep) {
       sleepState.asleep = true

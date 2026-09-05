@@ -13,6 +13,7 @@ plugins:
     autoNext: 10
     useGlobalNick: false
     adminQQ: []           # 管理员 QQ 白名单，例：['10001', '10002']
+    superAdminQQ: []      # 超级管理员，可 /添加管理员
     atQQ: false
     debug: false
     localPath: './data/answerData'
